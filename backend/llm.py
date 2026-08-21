@@ -1,147 +1,348 @@
+from __future__ import annotations
+
 import json
 import os
+import time
+from typing import Any
 
 from dotenv import load_dotenv
 from google import genai
+from google.genai import types
 
 
 load_dotenv()
 
 
 class GeminiClient:
+    """
+    Shared Gemini client.
 
-    def __init__(self):
-        api_key = os.getenv("GEMINI_API_KEY")
+    All model calls go through generate_json() so they
+    share one rate limiter. Nothing in this client is
+    invoked once per source file.
+
+    Agent 1:
+        classify_repository_files() — batched inventory.
+
+    Agent 2 semantic work lives in CodeStructureNormalizer
+    and consumes already-built Tree-sitter output.
+    """
+
+    CLASSIFY_BATCH_SIZE = 80
+    MIN_INTERVAL_SECONDS = 4.5
+
+    def __init__(self,api_key=None):
+
+        api_key = api_key or os.getenv("GEMINI_API_KEY")
 
         if not api_key:
-            raise ValueError(
-                "GEMINI_API_KEY is not set in the environment."
+            raise RuntimeError(
+                "GEMINI_API_KEY environment variable is not set."
             )
 
-        self.client = genai.Client(api_key=api_key)
-
-        self.model = "models/gemini-3.5-flash-lite"
-
-    def classify_repository_files(
-        self,
-        repository_name: str,
-        languages: dict,
-        files: list[dict],
-    ) -> list[dict]:
-
-        prompt = self._build_classification_prompt(
-            repository_name,
-            languages,
-            files,
+        self.client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(
+                retry_options=types.HttpRetryOptions(
+                    attempts=3,
+                    initial_delay=8.0,
+                    max_delay=45.0,
+                    http_status_codes=[
+                        408,
+                        429,
+                        500,
+                        502,
+                        503,
+                        504,
+                    ],
+                )
+            ),
         )
+
+        self.model = os.getenv(
+            "GEMINI_MODEL",
+            "gemini-3.5-flash-lite",
+        )
+
+        self._last_call_at = 0.0
+
+    # ========================================================
+    # RATE-LIMITED JSON CALL
+    # ========================================================
+
+    def generate_json(
+        self,
+        prompt: str,
+    ) -> Any:
+        """
+        Single Gemini entry point.
+
+        Waits between requests so we stay under the
+        model's per-minute request quota.
+        """
+
+        self._wait_for_slot()
 
         response = self.client.models.generate_content(
             model=self.model,
             contents=prompt,
-            config={
-                "temperature": 0,
-                "response_mime_type": "application/json",
-            },
+            config=types.GenerateContentConfig(
+                temperature=0,
+                response_mime_type="application/json",
+            ),
         )
 
-        response_text = response.text
+        self._last_call_at = time.monotonic()
 
-        if not response_text:
-            raise ValueError(
+        if not response.text:
+            raise RuntimeError(
                 "Gemini returned an empty response."
             )
 
         try:
-            result = json.loads(response_text)
+            return json.loads(response.text)
         except json.JSONDecodeError as error:
-            raise ValueError(
+            raise RuntimeError(
                 "Gemini returned invalid JSON."
             ) from error
 
-        return result.get("classifications", [])
+    def _wait_for_slot(self) -> None:
+
+        if self._last_call_at <= 0:
+            return
+
+        elapsed = time.monotonic() - self._last_call_at
+        remaining = self.MIN_INTERVAL_SECONDS - elapsed
+
+        if remaining > 0:
+            time.sleep(remaining)
+
+    # ========================================================
+    # AGENT 1
+    # REPOSITORY FILE CLASSIFICATION
+    # ========================================================
+
+    def classify_repository_files(
+        self,
+        repository_name: str,
+        languages: dict[str, int],
+        files: list[dict[str, Any]],
+    ) -> list[dict[str, str]]:
+        """
+        Classify the inventory in batches.
+
+        One Gemini call covers many files. A large
+        repository is split by inventory size, never
+        one request per file.
+        """
+
+        if not files:
+            return []
+
+        results: list[dict[str, str]] = []
+        batch_size = self.CLASSIFY_BATCH_SIZE
+
+        for start in range(0, len(files), batch_size):
+
+            batch = files[start:start + batch_size]
+
+            data = self.generate_json(
+                self._build_classification_prompt(
+                    repository_name=repository_name,
+                    languages=languages,
+                    files=batch,
+                )
+            )
+
+            results.extend(
+                self._parse_classifications(data)
+            )
+
+        return results
+
+    def _parse_classifications(
+        self,
+        data: Any,
+    ) -> list[dict[str, str]]:
+
+        if not isinstance(data, dict):
+            raise RuntimeError(
+                "Gemini classification response must be a JSON object."
+            )
+
+        classifications = data.get("classifications", [])
+
+        if not isinstance(classifications, list):
+            raise RuntimeError(
+                "Gemini classification response does not "
+                "contain a valid classifications list."
+            )
+
+        result = []
+
+        for item in classifications:
+
+            if not isinstance(item, dict):
+                continue
+
+            path = item.get("path")
+            category = item.get("category")
+
+            if not isinstance(path, str):
+                continue
+
+            if not isinstance(category, str):
+                continue
+
+            result.append(
+                {
+                    "path": path,
+                    "category": category,
+                }
+            )
+
+        return result
 
     def _build_classification_prompt(
         self,
         repository_name: str,
-        languages: dict,
-        files: list[dict],
+        languages: dict[str, int],
+        files: list[dict[str, Any]],
     ) -> str:
 
-        return f"""
-You are analyzing a software repository.
+        evidence = {
+            "repository_name": repository_name,
+            "languages": languages,
+            "files": files,
+        }
 
-Your task is to classify repository files based ONLY on
-the evidence provided.
+        evidence_json = json.dumps(
+            evidence,
+            indent=2,
+            ensure_ascii=False,
+        )
 
-IMPORTANT RULES:
+        return """
+You are the repository file-classification component of
+a language-agnostic code archaeology system.
 
-1. Do not assume a specific programming language or framework.
-2. Do not use hardcoded technology-specific rules.
-3. Infer the role of each file from its path, filename,
-   extension, size, surrounding repository structure,
-   and language information.
-4. Do not invent information that is not supported by the
-   provided evidence.
-5. Return exactly one category for every provided file.
-6. Preserve every file path exactly as provided.
+The Python system has collected generic repository facts.
+You must semantically classify the files.
 
-Allowed categories:
+============================================================
+IMPORTANT
+============================================================
 
-- source
-- test
-- documentation
-- configuration
-- asset
-- generated
-- build
-- other
+Do NOT assume a specific:
 
-Category meanings:
+- programming language
+- framework
+- library
+- ecosystem
+- build system
+- architecture
+
+Do not rely on hardcoded language-specific rules.
+
+Do not rely on hardcoded framework-specific rules.
+
+Use the supplied evidence:
+
+- repository context
+- path
+- filename
+- extension
+- file size
+- parent directory
+- language information
+- surrounding repository information
+
+Do not invent information.
+
+Every supplied file must receive exactly one category.
+
+Preserve the file path exactly.
+
+============================================================
+ALLOWED CATEGORIES
+============================================================
+
+source
+
+test
+
+documentation
+
+configuration
+
+asset
+
+generated
+
+build
+
+other
+
+============================================================
+CATEGORY MEANING
+============================================================
 
 source:
-Files that appear to contain application/library source code.
+A file that appears to contain application or library
+source code.
 
 test:
-Files primarily associated with automated tests.
+A file whose primary purpose is automated testing or
+test support.
 
 documentation:
-Human-readable documentation or project explanation.
+A human-readable project document or explanatory file.
 
 configuration:
-Files primarily containing project/tool/application configuration.
+A file primarily used to configure a tool, application,
+environment, project, or development process.
 
 asset:
-Images, fonts, media, static resources, or other non-code assets.
+A non-source resource such as an image, font, media,
+static resource, or other resource file.
 
 generated:
-Files that appear to be generated automatically from another source.
+A file that appears to have been automatically generated
+from another source or process.
 
 build:
-Build scripts, wrappers, compiled artifacts, packaging output,
-or files primarily used to build/package the project.
+A file primarily used for building, compiling, packaging,
+wrapping, or producing distributable output.
 
 other:
-Anything that does not confidently fit another category.
+A file that does not confidently fit another category.
 
-Repository:
+============================================================
+OUTPUT
+============================================================
 
-Name:
-{repository_name}
+Return ONLY valid JSON.
 
-Languages:
-{json.dumps(languages, indent=2)}
+Use exactly:
 
-Files:
-{json.dumps(files, indent=2)}
-
-Return ONLY valid JSON in this format:
-
-{{
+{
   "classifications": [
-    {{
-      "path": "exact/path/from/input",
-      "category": "one_allowed_category"
-    }}
+    {
+      "path": "exact input path",
+      "category": "one allowed category"
+    }
   ]
-}}
-"""
+}
+
+Do not return markdown.
+
+Do not return explanations.
+
+Do not omit files.
+
+Do not modify paths.
+
+============================================================
+REPOSITORY EVIDENCE
+============================================================
+""" + "\n" + evidence_json

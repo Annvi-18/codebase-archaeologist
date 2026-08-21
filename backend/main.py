@@ -1,8 +1,20 @@
+from dataclasses import asdict
+
+import requests
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from agents.repository_analyzer import RepositoryAnalyzer
-
+from agents.code_structure_normalizer import (
+    CodeStructureNormalizer,
+)
+from agents.relationship_architecture import (
+    RelationshipArchitectureAgent,
+)
+from agents.archaeological_analyzer import (
+    ArchaeologicalAnalyzer,
+)
 
 app = FastAPI(
     title="Codebase Archaeologist",
@@ -11,7 +23,9 @@ app = FastAPI(
 
 
 analyzer = RepositoryAnalyzer()
-
+normalizer = CodeStructureNormalizer()
+architecture_agent = RelationshipArchitectureAgent()
+archaeology_agent = ArchaeologicalAnalyzer()
 
 class RepositoryRequest(BaseModel):
     github_url: str
@@ -19,7 +33,6 @@ class RepositoryRequest(BaseModel):
 
 @app.get("/")
 def root():
-
     return {
         "message": "Codebase Archaeologist is running"
     }
@@ -29,53 +42,120 @@ def root():
 def analyze_repository(
     request: RepositoryRequest,
 ):
-
     try:
+
+        # ====================================================
+        # AGENT 1
+        # ====================================================
 
         result = analyzer.analyze(
             request.github_url
         )
 
-        return {
-            "repository": {
-                "name": result.name,
-                "url": result.url,
-                "default_branch": result.default_branch,
-                "total_files": result.total_files,
-                "total_directories": (
-                    result.total_directories
+        # ====================================================
+        # AGENT 2 — TREE-SITTER
+        # ====================================================
+
+        if result.structure is None:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Tree-sitter did not produce "
+                    "a CodebaseStructure."
                 ),
-            },
+            )
 
-            "languages": result.languages,
+        # ====================================================
+        # AGENT 2 — NORMALIZER
+        # ====================================================
 
-            "files": [
-                {
-                    "path": file.path,
-                    "size": file.size,
-                    "category": file.category,
-                }
+        semantic_result = normalizer.normalize(
+            result.structure
+        )
+
+        result.semantic = semantic_result
+
+        # ====================================================
+        # README
+        # ====================================================
+
+        readme = ""
+
+        readme_file = next(
+            (
+                file
                 for file in result.files
-            ],
+                if file.path.lower().replace("\\", "/")
+                .split("/")[-1]
+                == "readme.md"
+            ),
+            None,
+        )
 
-            "categories": {
-                "source": result.source_files,
-                "test": result.test_files,
-                "documentation": (
-                    result.documentation_files
-                ),
-                "configuration": (
-                    result.configuration_files
-                ),
-                "asset": result.asset_files,
-                "generated": result.generated_files,
-                "build": result.build_files,
-                "other": result.other_files,
-            },
+        if readme_file:
+
+            github_url = request.github_url.rstrip("/")
+
+            if github_url.endswith(".git"):
+                github_url = github_url[:-4]
+
+            readme_url = (
+                f"{github_url}/raw/refs/heads/"
+                f"{result.default_branch}/"
+                f"{readme_file.path.replace(chr(92), '/')}"
+            )
+
+            response = requests.get(
+                readme_url,
+                timeout=20,
+            )
+
+            if response.ok:
+                readme = response.text
+
+        # ====================================================
+        # AGENT 3
+        # ====================================================
+
+        architecture_result = (
+            architecture_agent.analyze(
+                readme=readme,
+                structure=result.structure,
+                semantic=semantic_result,
+            )
+        )
+
+        # ====================================================
+        # AGENT 4 — ARCHAEOLOGICAL ANALYSIS
+        # ====================================================
+
+        # ====================================================
+        # AGENT 4 — ARCHAEOLOGICAL ANALYSIS
+        # ====================================================
+
+        archaeology_result = archaeology_agent.analyze(
+            structure=result.structure,
+            semantic=semantic_result,
+            architecture=architecture_result,
+        )
+        # ====================================================
+        # RETURN
+        # ====================================================
+
+        return {
+            "repository": asdict(result),
+            "architecture": asdict(
+                architecture_result
+            ),
+            "archaeology": asdict(
+                archaeology_result
+            ),
         }
 
-    except Exception as error:
+    except HTTPException:
+        raise
 
+    except Exception as error:
         raise HTTPException(
             status_code=400,
             detail=str(error),
