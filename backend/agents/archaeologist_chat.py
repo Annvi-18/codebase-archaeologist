@@ -294,7 +294,16 @@ Rules:
 - Do not answer using general programming knowledge when the
   question is specifically about this repository.
 
-Keep the answer conversational but technically useful.
+Give enough detail to fully answer the question.
+
+For architecture, relationships, flows, findings, risks,
+and "why/how" questions, explain the relevant evidence,
+reasoning, and practical implication instead of giving
+a one-line answer.
+
+For simple factual questions, stay concise.
+
+Do not add irrelevant detail or repeat the same information.
 
 Return ONLY valid JSON:
 
