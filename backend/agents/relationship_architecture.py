@@ -140,7 +140,7 @@ class RelationshipArchitectureAgent:
             ensure_ascii=False,
         )
 
-        return f"""
+        prompt = """
 You are Agent 3 of a code archaeology system.
 
 Understand the repository using:
@@ -250,8 +250,9 @@ Return ONLY valid JSON:
 }
 
 EVIDENCE:
-{evidence_json}
 """
+
+        return prompt + evidence_json
 
     # ========================================================
     # RESPONSE PARSER

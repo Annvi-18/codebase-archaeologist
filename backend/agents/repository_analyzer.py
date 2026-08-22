@@ -10,7 +10,6 @@ from dotenv import load_dotenv
 from models import FileInfo, RepositoryInfo
 from llm import GeminiClient
 from agents.code_structure_analyzer import CodeStructureAnalyzer
-from agents.code_structure_normalizer import CodeStructureNormalizer
 
 
 load_dotenv()
@@ -49,7 +48,6 @@ class RepositoryAnalyzer:
     def __init__(self):
         self.llm = GeminiClient()
         self.structure_analyzer = CodeStructureAnalyzer()
-        self.structure_normalizer = CodeStructureNormalizer(self.llm)
 
     # =========================================================
     # PUBLIC ENTRY POINT
@@ -108,16 +106,6 @@ class RepositoryAnalyzer:
             )
 
             repository_info.structure = structure
-
-            # Tree-sitter has finished for every source file.
-            # Gemini now sees the aggregated structure as a
-            # whole or as a few payload-sized parts — never
-            # once per file.
-            repository_info.semantic = (
-                self.structure_normalizer.normalize(
-                    structure
-                )
-            )
 
             return repository_info
 

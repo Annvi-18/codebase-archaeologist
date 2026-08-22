@@ -377,6 +377,12 @@ class ArchitectureResult:
 
 
 @dataclass
+class ArchaeologicalResult:
+    findings: list[ArchaeologicalFinding] = field(
+        default_factory=list
+    )
+
+@dataclass
 class ArchaeologicalFinding:
     title: str
     category: str
@@ -393,9 +399,43 @@ class ArchaeologicalFinding:
 
     confidence: float = 0.0
 
+    evidence_refs: list[dict] = field(
+        default_factory=list
+    )
+
+    confidence_reason: str = ""
+
+    severity_reason: str = ""
+
 
 @dataclass
-class ArchaeologicalResult:
-    findings: list[ArchaeologicalFinding] = field(
+class ReportResult:
+    overview: str = ""
+
+    purpose: str = ""
+
+    technologies: list[str] = field(
+        default_factory=list
+    )
+
+    architecture: str = ""
+
+    components: list[dict] = field(
+        default_factory=list
+    )
+
+    flows: list[dict] = field(
+        default_factory=list
+    )
+
+    findings: list[dict] = field(
+        default_factory=list
+    )
+
+    risks: list[str] = field(
+        default_factory=list
+    )
+
+    solutions: list[dict] = field(
         default_factory=list
     )

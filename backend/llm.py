@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from typing import Any
 
@@ -31,7 +32,12 @@ class GeminiClient:
     CLASSIFY_BATCH_SIZE = 80
     MIN_INTERVAL_SECONDS = 4.5
 
-    def __init__(self,api_key=None):
+    # Shared across every GeminiClient instance so Agent 1–4
+    # cannot burst past the per-minute quota.
+    _lock = threading.Lock()
+    _last_call_at = 0.0
+
+    def __init__(self, api_key: str | None = None):
 
         api_key = api_key or os.getenv("GEMINI_API_KEY")
 
@@ -64,8 +70,6 @@ class GeminiClient:
             "gemini-3.5-flash-lite",
         )
 
-        self._last_call_at = 0.0
-
     # ========================================================
     # RATE-LIMITED JSON CALL
     # ========================================================
@@ -81,18 +85,19 @@ class GeminiClient:
         model's per-minute request quota.
         """
 
-        self._wait_for_slot()
+        with GeminiClient._lock:
+            self._wait_for_slot()
 
-        response = self.client.models.generate_content(
-            model=self.model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0,
-                response_mime_type="application/json",
-            ),
-        )
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0,
+                    response_mime_type="application/json",
+                ),
+            )
 
-        self._last_call_at = time.monotonic()
+            GeminiClient._last_call_at = time.monotonic()
 
         if not response.text:
             raise RuntimeError(
@@ -108,10 +113,10 @@ class GeminiClient:
 
     def _wait_for_slot(self) -> None:
 
-        if self._last_call_at <= 0:
+        if GeminiClient._last_call_at <= 0:
             return
 
-        elapsed = time.monotonic() - self._last_call_at
+        elapsed = time.monotonic() - GeminiClient._last_call_at
         remaining = self.MIN_INTERVAL_SECONDS - elapsed
 
         if remaining > 0:
